@@ -24,6 +24,7 @@ dfUserActions = None
 test = None
 predictionsDF = None
 train = None
+topProducts = None
 TRAIN_SPLIT = 0.6
 
 class MLStripper(HTMLParser):
@@ -53,6 +54,7 @@ def strip_tags(htmlString):
 def preProcess():
     global dfUsersPurchased
     global dfUsersAddedCart
+    global dfUsersViewed
     global userActionsCounts
     global dfProducts
     global dfUserActions
@@ -68,6 +70,7 @@ def preProcess():
     #separate events
     dfUsersPurchased = dfUserActions[dfUserActions.type == 'purchase_item']
     dfUsersAddedCart = dfUserActions[dfUserActions.type == 'add_to_cart']
+    dfUsersViewed = dfUserActions[dfUserActions.type == 'view_product']
 
     #get number of actions for each user
     userActionsCounts = dfUserActions.groupby(["customer_id", "type"]).count()
@@ -98,25 +101,33 @@ def preProcess():
 def buildModel():
     global dfUsersPurchased
     global dfUsersAddedCart
+    global dfUsersViewed
     global userActionsCounts
     global dfProducts
     global dfUserActions
     global test
     global train
     global predictionsDF
+    global topProducts
 
     # drop all products that have not been purchased
     # dfProducts = dfProducts[dfProducts['product_id'].isin(dfUsersPurchased['product_id'])]
     #dfUsersPurchased = shuffle(dfUsersPurchased)
-    dfUsersPurchased = dfUserActions[dfUserActions.type == 'purchase_item'].sort_values(by=["timestamp"])
-    split = int(dfUsersPurchased.shape[0] * TRAIN_SPLIT)
-    train, test = dfUsersPurchased.iloc[:split], dfUsersPurchased.iloc[split:]
+    dfUserActions = dfUserActions.sort_values(by=["timestamp"])
+    split = int(dfUserActions.shape[0] * TRAIN_SPLIT)
+    train, test = dfUserActions.iloc[:split], dfUserActions.iloc[split:]
 
-    trainPurchased = dfProducts[dfProducts['product_id'].isin(train['product_id'])]
+    trainProd = dfProducts[dfProducts['product_id'].isin(train["product_id"])]
+    trainPurchased = train[train.type == 'purchase_item']
+    trainAddCart = train[train.type == 'add_to_cart']
+
+    #get top sold products
+    topProducts = dfUsersPurchased.groupby(["product_id"]).count()['customer_id'].sort_values(ascending=False)
+    topProducts.columns = ["count"]
 
     #generate tfid matrix
-    tf = TfidfVectorizer(strip_accents="unicode", analyzer="word", stop_words="english", ngram_range=(1,2), min_df=1, norm="l1")
-    tfidMatrix = tf.fit_transform(trainPurchased["description"])
+    tf = TfidfVectorizer(strip_accents="unicode", analyzer="word", stop_words="english", ngram_range=(1,2), min_df=2, norm="l1")
+    tfidMatrix = tf.fit_transform(trainProd["description"])
 
     tfidMatrix = tfidMatrix.toarray()
     tfidMatrix = np.transpose(tfidMatrix)
@@ -126,8 +137,13 @@ def buildModel():
     #split users
 
     #create user product matrix columns are users, rows are products
-    train["value"] = 1
-    updf = pd.pivot_table(train, values="value", index=["product_id"], columns="customer_id", fill_value=0)
+    trainPurchased["value"] = 2
+    upTrainPurchased = pd.pivot_table(trainPurchased, values="value", index=["product_id"], columns="customer_id", fill_value=0)
+    trainAddCart["value"] = 1
+    upTrainAddCart = pd.pivot_table(trainAddCart, values="value", index=["product_id"], columns="customer_id", fill_value=0)
+
+    updf = upTrainPurchased.add(upTrainAddCart, fill_value=0)
+    updf = updf.fillna(0)
 
 
     userProfiles = np.matmul(tfidMatrix, updf.values)
@@ -148,7 +164,10 @@ def evalModel():
     global test
     global train
     global predictionsDF
+    global topProducts
 
+    test = test[test.type != 'add_to_cart']
+    train = train[train.type == 'purchase_item']
     customers = pd.unique(test["customer_id"])
 
     trendHits = 0
@@ -160,7 +179,7 @@ def evalModel():
         numPurchased = train[train["customer_id"] == i].shape[0]
         reccomendations = None
         if numPurchased == 0:
-            reccomendations = dfProducts.sample(5)["product_id"]
+            reccomendations = topProducts.head(5).index
             trendTotal = trendTotal + test[test["customer_id"] == i].shape[0]
             trendHits = trendHits + pd.Series(reccomendations).isin(test.loc[test["customer_id"] == i, ["product_id"]]["product_id"]).sum()
         else:
