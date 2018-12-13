@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from html.parser import HTMLParser
 import html
-from scipy.sparse import csr_matrix
+from sklearn import preprocessing
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.utils import shuffle
 
@@ -93,8 +93,21 @@ def preProcess():
     #drop all products that have not been purchased or added to cart
     #dfProducts = dfProducts[dfProducts['product_id'].isin(dfUserActions['product_id'])]
 
+
+
     #strip html from description
     dfProducts["description"] = dfProducts.apply(lambda row: strip_tags(row['description']), axis=1)
+
+    cunts = dfProducts[dfProducts.duplicated(["description", "category_path", "brand", "gender", "price"], keep=False)].sort_values(by=["description", "category_path", "brand", "gender", "price"])
+
+    prevRow = None
+    for index, row in cunts.iterrows():
+        if prevRow is not None:
+            if row.iloc[2:].equals(prevRow.iloc[2:]):
+                dfProducts.at[index, "product_id"] = prevRow["product_id"]
+                dfUserActions["product_id"] = dfUserActions["product_id"].replace(row["product_id"], prevRow["product_id"])
+        prevRow = row
+
 
     #!!BEWARE some descriptions are empty, some contain no usefull information, and couple are in slovak so we need co clear them next
 
@@ -137,13 +150,17 @@ def buildModel():
     #split users
 
     #create user product matrix columns are users, rows are products
-    trainPurchased["value"] = 2
+    trainPurchased["value"] = 1
     upTrainPurchased = pd.pivot_table(trainPurchased, values="value", index=["product_id"], columns="customer_id", fill_value=0)
-    trainAddCart["value"] = 1
+    trainAddCart["value"] = 0
     upTrainAddCart = pd.pivot_table(trainAddCart, values="value", index=["product_id"], columns="customer_id", fill_value=0)
 
     updf = upTrainPurchased.add(upTrainAddCart, fill_value=0)
     updf = updf.fillna(0)
+
+    min_max_scaler = preprocessing.MaxAbsScaler()
+    x_scaled = min_max_scaler.fit_transform(updf.values)
+    updf = pd.DataFrame(x_scaled, index=updf.index, columns=updf.columns.values)
 
 
     userProfiles = np.matmul(tfidMatrix, updf.values)
